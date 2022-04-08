@@ -5748,7 +5748,7 @@ func (mset *stream) isCatchingUp() bool {
 }
 
 // Maximum requests for the whole server that can be in flight.
-const maxConcurrentSyncRequests = 64
+const maxConcurrentSyncRequests = 8
 
 // Process a stream snapshot.
 func (mset *stream) processSnapshot(snap *streamSnapshot) error {
@@ -6188,9 +6188,6 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	defer s.sysUnsubscribe(ackSub)
 	ackReplyT := strings.ReplaceAll(ackReply, ".*", ".%d")
 
-	// EOF
-	defer s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, nil)
-
 	const activityInterval = 45 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
@@ -6200,15 +6197,17 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	mset.setCatchupPeer(sreq.Peer, last-seq)
 	defer mset.clearCatchupPeer(sreq.Peer)
 
-	sendNextBatch := func() {
+	sendNextBatchAndContinue := func() bool {
+		// Update our activity timer.
+		notActive.Reset(activityInterval)
+
 		var smv StoreMsg
 		for ; seq <= last && atomic.LoadInt64(&outb) <= maxOutBytes && s.gcbTotal() <= maxTotalCatchupOutBytes; seq++ {
 			sm, err := mset.store.LoadMsg(seq, &smv)
 			// if this is not a deleted msg, bail out.
 			if err != nil && err != ErrStoreMsgNotFound && err != errDeletedMsg {
-				// break, something changed.
-				seq = last + 1
-				return
+				s.Warnf("Error loading message for catchup '%s > %s': %v", mset.account(), mset.name(), err)
+				return false
 			}
 			// S2?
 			var em []byte
@@ -6224,7 +6223,14 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 			atomic.AddInt64(&outb, l)
 			s.gcbAdd(l)
 			s.sendInternalMsgLocked(sendSubject, reply, nil, em)
+			if seq == last {
+				s.Noticef("Done resync for stream '%s > %s'", mset.account(), mset.name())
+				// EOF
+				s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, nil)
+				return false
+			}
 		}
+		return true
 	}
 
 	// Grab stream quit channel.
@@ -6233,17 +6239,6 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	mset.mu.RUnlock()
 	if qch == nil {
 		return
-	}
-
-	doNextBatch := func() {
-		// Update our activity timer.
-		notActive.Reset(activityInterval)
-		sendNextBatch()
-		// Check if we are finished.
-		if seq > last {
-			s.Debugf("Done resync for stream '%s > %s'", mset.account(), mset.name())
-			return
-		}
 	}
 
 	// Run as long as we are still active and need catchup.
@@ -6259,16 +6254,19 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 			return
 		case <-notActive.C:
 			if s.gcbTotal() >= maxTotalCatchupOutBytes {
-				s.Warnf("\n\nReset activity\n\n")
 				notActive.Reset(activityInterval)
 			} else {
 				s.Warnf("Catchup for stream '%s > %s' stalled", mset.account(), mset.name())
 				return
 			}
 		case <-nextBatchC:
-			doNextBatch()
+			if !sendNextBatchAndContinue() {
+				return
+			}
 		case <-cbKick:
-			doNextBatch()
+			if !sendNextBatchAndContinue() {
+				return
+			}
 		}
 	}
 }
