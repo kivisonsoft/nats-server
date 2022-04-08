@@ -1110,6 +1110,12 @@ func (n *raft) Leader() bool {
 	return isLeader
 }
 
+func (n *raft) isCatchingUp() bool {
+	n.RLock()
+	defer n.RUnlock()
+	return n.catchup != nil
+}
+
 // Lock should be held.
 func (n *raft) isCurrent() bool {
 	// First check if we match commit and applied.
@@ -1254,6 +1260,7 @@ func (n *raft) campaign() error {
 		return errAlreadyLeader
 	}
 	n.lxfer = true
+	fmt.Printf("srv=%s - group=%s - xfer=%v - STARTING CAMPAIGN!!!\n\n", n.s, n.group, n.lxfer)
 	n.resetElect(randCampaignTimeout())
 
 	return nil
@@ -1574,6 +1581,8 @@ func (n *raft) runAsFollower() {
 			} else if n.isObserver() {
 				n.resetElect(48 * time.Hour)
 				n.debug("Not switching to candidate, observer only")
+			} else if n.isCatchingUp() {
+				n.debug("Not switching to candidate, catching up")
 			} else {
 				n.switchToCandidate()
 				return
