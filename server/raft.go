@@ -2488,6 +2488,7 @@ func (n *raft) handleAppendEntry(sub *subscription, c *client, _ *Account, subje
 	} else {
 		n.warn("AppendEntry failed to be placed on internal channel: corrupt entry")
 	}
+	n.resetElectionTimeout()
 }
 
 // Lock should be held.
@@ -2594,8 +2595,6 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 		}
 		n.stepdown.push(ae.leader)
 	}
-
-	n.resetElectionTimeout()
 
 	// Catching up state.
 	catchingUp := n.catchup != nil
