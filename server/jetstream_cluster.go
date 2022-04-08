@@ -5790,7 +5790,7 @@ func (mset *stream) processSnapshot(snap *streamSnapshot) error {
 	var sub *subscription
 	var err error
 
-	const activityInterval = 5 * time.Second
+	const activityInterval = 60 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
 
