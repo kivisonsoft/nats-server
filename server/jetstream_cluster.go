@@ -1457,7 +1457,7 @@ func (js *jetStream) createRaftGroup(accName string, rg *raftGroup, storage Stor
 	var store StreamStore
 	if storage == FileStorage {
 		fs, err := newFileStore(
-			FileStoreConfig{StoreDir: storeDir, BlockSize: 4_000_000, AsyncFlush: false, SyncInterval: 5 * time.Minute},
+			FileStoreConfig{StoreDir: storeDir, BlockSize: defaultMediumBlockSize, AsyncFlush: false, SyncInterval: 5 * time.Minute},
 			StreamConfig{Name: rg.Name, Storage: FileStorage},
 		)
 		if err != nil {

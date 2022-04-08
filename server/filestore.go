@@ -218,14 +218,14 @@ const (
 	blkKeySize  = 72
 
 	// Default stream block size.
-	defaultLargeBlockSize = 16 * 1024 * 1024 // 16MB
+	defaultLargeBlockSize = 4 * 1024 * 1024 // 4MB
 	// Default for workqueue or interest based.
-	defaultMediumBlockSize = 8 * 1024 * 1024 // 8MB
-	// Default for KV based
-	defaultKVBlockSize = 8 * 1024 * 1024 // 8MB
+	defaultMediumBlockSize = 2 * 1024 * 1024 // 2MB
 	// For smaller reuse buffers. Usually being generated during contention on the lead write buffer.
 	// E.g. mirrors/sources etc.
-	defaultSmallBlockSize = 2 * 1024 * 1024 // 2MB
+	defaultSmallBlockSize = 1 * 1024 * 1024 // 1MB
+	// Default for KV based
+	defaultKVBlockSize = defaultMediumBlockSize
 	// max block size for now.
 	maxBlockSize = defaultLargeBlockSize
 	// Compact minimum threshold.

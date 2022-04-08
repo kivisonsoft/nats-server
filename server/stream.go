@@ -686,11 +686,12 @@ func (mset *stream) autoTuneFileStorageBlockSize(fsCfg *FileStoreConfig) {
 	if m := blkSize % 100; m != 0 {
 		blkSize += 100 - m
 	}
-	if blkSize < FileStoreMinBlkSize {
+	if blkSize <= FileStoreMinBlkSize {
 		blkSize = FileStoreMinBlkSize
-	}
-	if blkSize > FileStoreMaxBlkSize {
+	} else if blkSize >= FileStoreMaxBlkSize {
 		blkSize = FileStoreMaxBlkSize
+	} else {
+		blkSize = defaultMediumBlockSize
 	}
 	fsCfg.BlockSize = uint64(blkSize)
 }
