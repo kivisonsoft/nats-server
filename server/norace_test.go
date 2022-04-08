@@ -4731,6 +4731,89 @@ func TestNoRaceOrderedConsumerLongRTTPerformance(t *testing.T) {
 	fmt.Printf("%.0f mb/s\n\n", float64(si.State.Bytes/(1024*1024))/tt.Seconds())
 }
 
+var jsClusterStallCatchupTempl = `
+	listen: 127.0.0.1:-1
+	server_name: %s
+	jetstream: {max_mem_store: 256MB, max_file_store: 32GB, store_dir: '%s'}
+
+	leaf {
+		listen: 127.0.0.1:-1
+	}
+
+	cluster {
+		name: %s
+		listen: 127.0.0.1:%d
+		routes = [%s]
+	}
+
+	# For access to system account.
+	accounts { $SYS { users = [ { user: "admin", pass: "s3cr3t!" } ] } }
+`
+
+// Test our global stall gate for outstanding catchup bytes.
+func TestJetStreamClusterCatchupStallGate(t *testing.T) {
+	skip(t)
+
+	c := createJetStreamClusterWithTemplate(t, jsClusterStallCatchupTempl, "GSG", 3)
+	defer c.shutdown()
+
+	nc, js := jsClientConnect(t, c.randomServer())
+	defer nc.Close()
+
+	// ~100k per message.
+	msg := []byte(strings.Repeat("A", 99_960))
+
+	// Create 100 streams with 100MB.
+	// Each server has ~1GB
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(x int) {
+			defer wg.Done()
+			for n := 1; n <= 10; n++ {
+				sn := fmt.Sprintf("S-%d", n+x)
+				_, err := js.AddStream(&nats.StreamConfig{
+					Name:     sn,
+					Replicas: 3,
+				})
+				require_NoError(t, err)
+				for i := 0; i < 100; i++ {
+					_, err := js.Publish(sn, msg)
+					require_NoError(t, err)
+				}
+			}
+		}(i * 10)
+	}
+	wg.Wait()
+
+	info, err := js.AccountInfo()
+	require_NoError(t, err)
+	require_True(t, info.Streams == 100)
+
+	runtime.GC()
+	debug.FreeOSMemory()
+
+	// Now bring a server down and wipe its storage.
+	s := c.servers[0]
+	vz, err := s.Varz(nil)
+	require_NoError(t, err)
+	fmt.Printf("MEM BEFORE is %v\n", friendlyBytes(vz.Mem))
+
+	sd := s.JetStreamConfig().StoreDir
+	s.Shutdown()
+	removeDir(t, sd)
+	s = c.restartServer(s)
+
+	c.waitOnServerHealthz(s)
+
+	runtime.GC()
+	debug.FreeOSMemory()
+
+	vz, err = s.Varz(nil)
+	require_NoError(t, err)
+	fmt.Printf("MEM AFTER is %v\n", friendlyBytes(vz.Mem))
+}
+
 // Net Proxy - For introducing RTT and BW constraints.
 type netProxy struct {
 	listener net.Listener

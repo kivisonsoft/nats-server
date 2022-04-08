@@ -111,6 +111,7 @@ type Server struct {
 	gcid uint64
 	// How often user logon fails due to the issuer account not being pinned.
 	pinnedAccFail uint64
+
 	stats
 	mu                  sync.Mutex
 	kp                  nkeys.KeyPair
@@ -275,6 +276,12 @@ type Server struct {
 	// To limit logging frequency
 	rateLimitLogging   sync.Map
 	rateLimitLoggingCh chan time.Duration
+
+	// Total outstanding catchup bytes in flight.
+	gcbMu  sync.RWMutex
+	gcbOut int64
+	// A global chanel to kick out stalled catchup sequences.
+	gcbKick chan struct{}
 }
 
 // For tracking JS nodes.

@@ -1260,7 +1260,6 @@ func (n *raft) campaign() error {
 		return errAlreadyLeader
 	}
 	n.lxfer = true
-	fmt.Printf("srv=%s - group=%s - xfer=%v - STARTING CAMPAIGN!!!\n\n", n.s, n.group, n.lxfer)
 	n.resetElect(randCampaignTimeout())
 
 	return nil
