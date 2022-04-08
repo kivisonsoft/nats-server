@@ -5790,7 +5790,7 @@ func (mset *stream) processSnapshot(snap *streamSnapshot) error {
 	var sub *subscription
 	var err error
 
-	const activityInterval = 15 * time.Second
+	const activityInterval = 60 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
 
@@ -6124,7 +6124,7 @@ func (s *Server) gcbSub(sz int64) {
 	s.gcbMu.Lock()
 	s.gcbOut -= sz
 	if s.gcbOut < 0 {
-		fmt.Printf("gcbOut is negative: %v\n\n", s.gcbOut)
+		panic(fmt.Sprintf("gcbOut is negative: %v\n\n", s.gcbOut))
 	}
 	if s.gcbKick != nil && s.gcbOut < maxTotalCatchupOutBytes {
 		close(s.gcbKick)
@@ -6249,8 +6249,13 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 		case <-qch:
 			return
 		case <-notActive.C:
-			s.Warnf("Catchup for stream '%s > %s' stalled", mset.account(), mset.name())
-			return
+			if s.gcbTotal() >= maxTotalCatchupOutBytes {
+				s.Warnf("\n\nReset activity\n\n")
+				notActive.Reset(activityInterval)
+			} else {
+				s.Warnf("Catchup for stream '%s > %s' stalled", mset.account(), mset.name())
+				return
+			}
 		case <-nextBatchC:
 			doNextBatch()
 		case <-cbKick:
