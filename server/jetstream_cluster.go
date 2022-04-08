@@ -5748,7 +5748,7 @@ func (mset *stream) isCatchingUp() bool {
 }
 
 // Maximum requests for the whole server that can be in flight.
-const maxConcurrentSyncRequests = 128
+const maxConcurrentSyncRequests = 64
 
 // Process a stream snapshot.
 func (mset *stream) processSnapshot(snap *streamSnapshot) error {
@@ -6191,7 +6191,7 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	// EOF
 	defer s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, nil)
 
-	const activityInterval = 15 * time.Second
+	const activityInterval = 45 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
 
