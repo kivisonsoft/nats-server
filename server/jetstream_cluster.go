@@ -6114,7 +6114,7 @@ func (s *Server) gcbTotal() int64 {
 func (s *Server) gcbAdd(sz int64) {
 	s.gcbMu.Lock()
 	s.gcbOut += sz
-	if s.gcbOut >= maxTotalCatchupOutBytes {
+	if s.gcbOut >= maxTotalCatchupOutBytes && s.gcbKick == nil {
 		s.gcbKick = make(chan struct{})
 	}
 	s.gcbMu.Unlock()
@@ -6179,7 +6179,7 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	// EOF
 	defer s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, nil)
 
-	const activityInterval = 5 * time.Second
+	const activityInterval = 30 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
 
