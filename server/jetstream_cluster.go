@@ -5790,7 +5790,7 @@ func (mset *stream) processSnapshot(snap *streamSnapshot) error {
 	var sub *subscription
 	var err error
 
-	const activityInterval = 60 * time.Second
+	const activityInterval = 15 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
 
@@ -6100,7 +6100,7 @@ func (mset *stream) handleClusterStreamInfoRequest(sub *subscription, c *client,
 	sysc.sendInternalMsg(reply, _EMPTY_, nil, si)
 }
 
-const maxTotalCatchupOutBytes = int64(64 * 1024 * 1024) // 64MB for now, for the total server.
+const maxTotalCatchupOutBytes = int64(128 * 1024 * 1024) // 128MB for now, for the total server.
 
 // Current total outstanding catchup bytes.
 func (s *Server) gcbTotal() int64 {
@@ -6123,6 +6123,9 @@ func (s *Server) gcbAdd(sz int64) {
 func (s *Server) gcbSub(sz int64) {
 	s.gcbMu.Lock()
 	s.gcbOut -= sz
+	if s.gcbOut < 0 {
+		fmt.Printf("gcbOut is negative: %v\n\n", s.gcbOut)
+	}
 	if s.gcbKick != nil && s.gcbOut < maxTotalCatchupOutBytes {
 		close(s.gcbKick)
 		s.gcbKick = nil
@@ -6179,7 +6182,7 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	// EOF
 	defer s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, nil)
 
-	const activityInterval = 30 * time.Second
+	const activityInterval = 60 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
 
