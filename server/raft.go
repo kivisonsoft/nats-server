@@ -229,7 +229,7 @@ const (
 	minCampaignTimeoutDefault = 100 * time.Millisecond
 	maxCampaignTimeoutDefault = 8 * minCampaignTimeoutDefault
 	hbIntervalDefault         = 500 * time.Millisecond
-	lostQuorumIntervalDefault = hbIntervalDefault * 5
+	lostQuorumIntervalDefault = hbIntervalDefault * 20 // 10 seconds
 )
 
 var (
@@ -2861,6 +2861,14 @@ func (n *raft) handleAppendEntryResponse(sub *subscription, c *client, _ *Accoun
 	ar := n.decodeAppendEntryResponse(msg)
 	ar.reply = reply
 	n.resp.push(ar)
+	if ar.success {
+		n.Lock()
+		// Update peer's last index.
+		if ps := n.peers[ar.peer]; ps != nil && ar.index > ps.li {
+			ps.li = ar.index
+		}
+		n.Unlock()
+	}
 }
 
 func (n *raft) buildAppendEntry(entries []*Entry) *appendEntry {
