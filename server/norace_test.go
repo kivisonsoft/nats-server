@@ -4763,10 +4763,10 @@ func TestJetStreamClusterCatchupStallGate(t *testing.T) {
 	// ~100k per message.
 	msg := []byte(strings.Repeat("A", 99_960))
 
-	// Create 100 streams with 100MB.
-	// Each server has ~1GB
+	// Create 200 streams with 100MB.
+	// Each server has ~2GB
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func(x int) {
 			defer wg.Done()
@@ -4782,13 +4782,13 @@ func TestJetStreamClusterCatchupStallGate(t *testing.T) {
 					require_NoError(t, err)
 				}
 			}
-		}(i * 10)
+		}(i * 20)
 	}
 	wg.Wait()
 
 	info, err := js.AccountInfo()
 	require_NoError(t, err)
-	require_True(t, info.Streams == 100)
+	require_True(t, info.Streams == 200)
 
 	runtime.GC()
 	debug.FreeOSMemory()

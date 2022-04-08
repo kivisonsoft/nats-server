@@ -851,6 +851,13 @@ func (s *Server) shutdownJetStream() {
 	s.Noticef("Initiating JetStream Shutdown...")
 	defer s.Noticef("JetStream Shutdown")
 
+	// If we have folks blocked on sync requests, unblock.
+	if sro := len(s.syncOutSem); sro == 0 {
+		for i := 0; i < maxConcurrentSyncRequests; i++ {
+			s.syncOutSem <- struct{}{}
+		}
+	}
+
 	var _a [512]*Account
 	accounts := _a[:0]
 

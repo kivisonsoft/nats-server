@@ -5747,6 +5747,9 @@ func (mset *stream) isCatchingUp() bool {
 	return mset.catchup
 }
 
+// Maximum requests for the whole server that can be in flight.
+const maxConcurrentSyncRequests = 128
+
 // Process a stream snapshot.
 func (mset *stream) processSnapshot(snap *streamSnapshot) error {
 	// Update any deletes, etc.
@@ -5852,8 +5855,14 @@ RETRY:
 		goto RETRY
 	}
 
+	// Block here if we have too many requests in flight.
+	<-s.syncOutSem
 	b, _ := json.Marshal(sreq)
 	s.sendInternalMsgLocked(subject, reply, nil, b)
+	defer func() { s.syncOutSem <- struct{}{} }()
+
+	// Reset in case we stalled above.
+	notActive.Reset(activityInterval)
 
 	// Clear our sync request and capture last.
 	last := sreq.LastSeq
@@ -6182,7 +6191,7 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	// EOF
 	defer s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, nil)
 
-	const activityInterval = 60 * time.Second
+	const activityInterval = 15 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
 
