@@ -6116,15 +6116,17 @@ const maxTotalCatchupOutBytes = int64(128 * 1024 * 1024) // 128MB for now, for t
 
 // Current total outstanding catchup bytes.
 func (s *Server) gcbTotal() int64 {
-	s.gcbMu.Lock()
-	gcbo := s.gcbOut
-	s.gcbMu.Unlock()
-	return gcbo
+	s.gcbMu.RLock()
+	defer s.gcbMu.RUnlock()
+	return s.gcbOut
 }
 
-// Add to our server total outstanding catchup bytes.
-func (s *Server) gcbAdd(sz int64) {
+// Adds `sz` to the server's total outstanding catchup bytes and to `localsz`
+// under the gcbMu lock. The `localsz` points to the local outstanding catchup
+// bytes of the runCatchup go routine of a given stream.
+func (s *Server) gcbAdd(localsz *int64, sz int64) {
 	s.gcbMu.Lock()
+	*localsz += sz
 	s.gcbOut += sz
 	if s.gcbOut >= maxTotalCatchupOutBytes && s.gcbKick == nil {
 		s.gcbKick = make(chan struct{})
@@ -6132,13 +6134,37 @@ func (s *Server) gcbAdd(sz int64) {
 	s.gcbMu.Unlock()
 }
 
-func (s *Server) gcbSub(sz int64) {
-	s.gcbMu.Lock()
+// Removes `sz` from the server's total outstanding catchup bytes and from
+// `localsz`, but only if `localsz` is non 0, which would signal that gcSubLast
+// has already been invoked. See that function for details.
+// Must be invoked under the gcbMu lock.
+func (s *Server) gcbSubLocked(localsz *int64, sz int64) {
+	if *localsz == 0 {
+		return
+	}
+	*localsz -= sz
 	s.gcbOut -= sz
 	if s.gcbKick != nil && s.gcbOut < maxTotalCatchupOutBytes {
 		close(s.gcbKick)
 		s.gcbKick = nil
 	}
+}
+
+// Locked version of gcbSubLocked()
+func (s *Server) gcbSub(localsz *int64, sz int64) {
+	s.gcbMu.Lock()
+	s.gcbSubLocked(localsz, sz)
+	s.gcbMu.Unlock()
+}
+
+// Similar to gcbSub() but reset `localsz` to 0 at the end under the gcbMu lock.
+// This will signal further calls to gcbSub() for this `localsz` pointer that
+// nothing should be done because runCatchup() has exited and any remaining
+// outstanding bytes value has already been decremented.
+func (s *Server) gcbSubLast(localsz *int64) {
+	s.gcbMu.Lock()
+	s.gcbSubLocked(localsz, *localsz)
+	*localsz = 0
 	s.gcbMu.Unlock()
 }
 
@@ -6157,9 +6183,7 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	outb := int64(0)
 
 	// On abnormal exit make sure to update global total.
-	defer func() {
-		s.gcbSub(atomic.LoadInt64(&outb))
-	}()
+	defer s.gcbSubLast(&outb)
 
 	// Flow control processing.
 	ackReplySize := func(subj string) int64 {
@@ -6176,8 +6200,7 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	ackReply := syncAckSubject()
 	ackSub, _ := s.sysSubscribe(ackReply, func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 		sz := ackReplySize(subject)
-		atomic.AddInt64(&outb, -sz)
-		s.gcbSub(sz)
+		s.gcbSub(&outb, sz)
 		mset.updateCatchupPeer(sreq.Peer)
 		// Kick ourselves and anyone else who might have stalled on global state.
 		select {
@@ -6220,11 +6243,10 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 			// Place size in reply subject for flow control.
 			l := int64(len(em))
 			reply := fmt.Sprintf(ackReplyT, l)
-			atomic.AddInt64(&outb, l)
-			s.gcbAdd(l)
+			s.gcbAdd(&outb, l)
 			s.sendInternalMsgLocked(sendSubject, reply, nil, em)
 			if seq == last {
-				s.Noticef("Done resync for stream '%s > %s'", mset.account(), mset.name())
+				s.Noticef("Catchup for stream '%s > %s' complete", mset.account(), mset.name())
 				// EOF
 				s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, nil)
 				return false
