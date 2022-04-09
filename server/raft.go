@@ -229,7 +229,7 @@ const (
 	minCampaignTimeoutDefault = 100 * time.Millisecond
 	maxCampaignTimeoutDefault = 8 * minCampaignTimeoutDefault
 	hbIntervalDefault         = 500 * time.Millisecond
-	lostQuorumIntervalDefault = hbIntervalDefault * 5
+	lostQuorumIntervalDefault = hbIntervalDefault * 20 // 10 seconds
 )
 
 var (
@@ -1110,6 +1110,12 @@ func (n *raft) Leader() bool {
 	return isLeader
 }
 
+func (n *raft) isCatchingUp() bool {
+	n.RLock()
+	defer n.RUnlock()
+	return n.catchup != nil
+}
+
 // Lock should be held.
 func (n *raft) isCurrent() bool {
 	// First check if we match commit and applied.
@@ -1574,6 +1580,8 @@ func (n *raft) runAsFollower() {
 			} else if n.isObserver() {
 				n.resetElect(48 * time.Hour)
 				n.debug("Not switching to candidate, observer only")
+			} else if n.isCatchingUp() {
+				n.debug("Not switching to candidate, catching up")
 			} else {
 				n.switchToCandidate()
 				return
@@ -2479,6 +2487,7 @@ func (n *raft) handleAppendEntry(sub *subscription, c *client, _ *Account, subje
 	} else {
 		n.warn("AppendEntry failed to be placed on internal channel: corrupt entry")
 	}
+	n.resetElectionTimeout()
 }
 
 // Lock should be held.
@@ -2585,8 +2594,6 @@ func (n *raft) processAppendEntry(ae *appendEntry, sub *subscription) {
 		}
 		n.stepdown.push(ae.leader)
 	}
-
-	n.resetElectionTimeout()
 
 	// Catching up state.
 	catchingUp := n.catchup != nil
@@ -2853,6 +2860,14 @@ func (n *raft) handleAppendEntryResponse(sub *subscription, c *client, _ *Accoun
 	ar := n.decodeAppendEntryResponse(msg)
 	ar.reply = reply
 	n.resp.push(ar)
+	if ar.success {
+		n.Lock()
+		// Update peer's last index.
+		if ps := n.peers[ar.peer]; ps != nil && ar.index > ps.li {
+			ps.li = ar.index
+		}
+		n.Unlock()
+	}
 }
 
 func (n *raft) buildAppendEntry(entries []*Entry) *appendEntry {

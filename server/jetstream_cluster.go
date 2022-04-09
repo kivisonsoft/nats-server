@@ -1457,7 +1457,7 @@ func (js *jetStream) createRaftGroup(accName string, rg *raftGroup, storage Stor
 	var store StreamStore
 	if storage == FileStorage {
 		fs, err := newFileStore(
-			FileStoreConfig{StoreDir: storeDir, BlockSize: 4_000_000, AsyncFlush: false, SyncInterval: 5 * time.Minute},
+			FileStoreConfig{StoreDir: storeDir, BlockSize: defaultMediumBlockSize, AsyncFlush: false, SyncInterval: 5 * time.Minute},
 			StreamConfig{Name: rg.Name, Storage: FileStorage},
 		)
 		if err != nil {
@@ -5747,6 +5747,9 @@ func (mset *stream) isCatchingUp() bool {
 	return mset.catchup
 }
 
+// Maximum requests for the whole server that can be in flight.
+const maxConcurrentSyncRequests = 8
+
 // Process a stream snapshot.
 func (mset *stream) processSnapshot(snap *streamSnapshot) error {
 	// Update any deletes, etc.
@@ -5790,7 +5793,7 @@ func (mset *stream) processSnapshot(snap *streamSnapshot) error {
 	var sub *subscription
 	var err error
 
-	const activityInterval = 5 * time.Second
+	const activityInterval = 60 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
 
@@ -5852,8 +5855,17 @@ RETRY:
 		goto RETRY
 	}
 
+	// Block here if we have too many requests in flight.
+	<-s.syncOutSem
+	defer func() { s.syncOutSem <- struct{}{} }()
+	if !s.isRunning() {
+		return nil
+	}
 	b, _ := json.Marshal(sreq)
 	s.sendInternalMsgLocked(subject, reply, nil, b)
+
+	// Reset in case we stalled above.
+	notActive.Reset(activityInterval)
 
 	// Clear our sync request and capture last.
 	last := sreq.LastSeq
@@ -6100,13 +6112,54 @@ func (mset *stream) handleClusterStreamInfoRequest(sub *subscription, c *client,
 	sysc.sendInternalMsg(reply, _EMPTY_, nil, si)
 }
 
+const maxTotalCatchupOutBytes = int64(128 * 1024 * 1024) // 128MB for now, for the total server.
+
+// Current total outstanding catchup bytes.
+func (s *Server) gcbTotal() int64 {
+	s.gcbMu.Lock()
+	gcbo := s.gcbOut
+	s.gcbMu.Unlock()
+	return gcbo
+}
+
+// Add to our server total outstanding catchup bytes.
+func (s *Server) gcbAdd(sz int64) {
+	s.gcbMu.Lock()
+	s.gcbOut += sz
+	if s.gcbOut >= maxTotalCatchupOutBytes && s.gcbKick == nil {
+		s.gcbKick = make(chan struct{})
+	}
+	s.gcbMu.Unlock()
+}
+
+func (s *Server) gcbSub(sz int64) {
+	s.gcbMu.Lock()
+	s.gcbOut -= sz
+	if s.gcbKick != nil && s.gcbOut < maxTotalCatchupOutBytes {
+		close(s.gcbKick)
+		s.gcbKick = nil
+	}
+	s.gcbMu.Unlock()
+}
+
+// Returns our kick chan, or nil if it does not exist.
+func (s *Server) cbKickChan() <-chan struct{} {
+	s.gcbMu.RLock()
+	defer s.gcbMu.RUnlock()
+	return s.gcbKick
+}
+
 func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	s := mset.srv
 	defer s.grWG.Done()
 
-	const maxOutBytes = int64(16 * 1024 * 1024) // 16MB for now.
-	const maxOutMsgs = int32(16384)
-	outb, outm := int64(0), int32(0)
+	const maxOutBytes = int64(defaultMediumBlockSize) // 2MB for now.
+	outb := int64(0)
+
+	// On abnormal exit make sure to update global total.
+	defer func() {
+		s.gcbSub(atomic.LoadInt64(&outb))
+	}()
 
 	// Flow control processing.
 	ackReplySize := func(subj string) int64 {
@@ -6124,8 +6177,9 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	ackSub, _ := s.sysSubscribe(ackReply, func(sub *subscription, c *client, _ *Account, subject, reply string, msg []byte) {
 		sz := ackReplySize(subject)
 		atomic.AddInt64(&outb, -sz)
-		atomic.AddInt32(&outm, -1)
+		s.gcbSub(sz)
 		mset.updateCatchupPeer(sreq.Peer)
+		// Kick ourselves and anyone else who might have stalled on global state.
 		select {
 		case nextBatchC <- struct{}{}:
 		default:
@@ -6134,10 +6188,7 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	defer s.sysUnsubscribe(ackSub)
 	ackReplyT := strings.ReplaceAll(ackReply, ".*", ".%d")
 
-	// EOF
-	defer s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, nil)
-
-	const activityInterval = 5 * time.Second
+	const activityInterval = 45 * time.Second
 	notActive := time.NewTimer(activityInterval)
 	defer notActive.Stop()
 
@@ -6146,15 +6197,17 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	mset.setCatchupPeer(sreq.Peer, last-seq)
 	defer mset.clearCatchupPeer(sreq.Peer)
 
-	sendNextBatch := func() {
+	sendNextBatchAndContinue := func() bool {
+		// Update our activity timer.
+		notActive.Reset(activityInterval)
+
 		var smv StoreMsg
-		for ; seq <= last && atomic.LoadInt64(&outb) <= maxOutBytes && atomic.LoadInt32(&outm) <= maxOutMsgs; seq++ {
+		for ; seq <= last && atomic.LoadInt64(&outb) <= maxOutBytes && s.gcbTotal() <= maxTotalCatchupOutBytes; seq++ {
 			sm, err := mset.store.LoadMsg(seq, &smv)
 			// if this is not a deleted msg, bail out.
 			if err != nil && err != ErrStoreMsgNotFound && err != errDeletedMsg {
-				// break, something changed.
-				seq = last + 1
-				return
+				s.Warnf("Error loading message for catchup '%s > %s': %v", mset.account(), mset.name(), err)
+				return false
 			}
 			// S2?
 			var em []byte
@@ -6165,11 +6218,19 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 				em = encodeStreamMsg(_EMPTY_, _EMPTY_, nil, nil, seq, 0)
 			}
 			// Place size in reply subject for flow control.
-			reply := fmt.Sprintf(ackReplyT, len(em))
-			atomic.AddInt64(&outb, int64(len(em)))
-			atomic.AddInt32(&outm, 1)
+			l := int64(len(em))
+			reply := fmt.Sprintf(ackReplyT, l)
+			atomic.AddInt64(&outb, l)
+			s.gcbAdd(l)
 			s.sendInternalMsgLocked(sendSubject, reply, nil, em)
+			if seq == last {
+				s.Noticef("Done resync for stream '%s > %s'", mset.account(), mset.name())
+				// EOF
+				s.sendInternalMsgLocked(sendSubject, _EMPTY_, nil, nil)
+				return false
+			}
 		}
+		return true
 	}
 
 	// Grab stream quit channel.
@@ -6183,21 +6244,27 @@ func (mset *stream) runCatchup(sendSubject string, sreq *streamSyncRequest) {
 	// Run as long as we are still active and need catchup.
 	// FIXME(dlc) - Purge event? Stream delete?
 	for {
+		// Get this each time, will be non-nil if globally blocked and we will close to wake everyone up.
+		cbKick := s.cbKickChan()
+
 		select {
 		case <-s.quitCh:
 			return
 		case <-qch:
 			return
 		case <-notActive.C:
-			s.Warnf("Catchup for stream '%s > %s' stalled", mset.account(), mset.name())
-			return
+			if s.gcbTotal() >= maxTotalCatchupOutBytes {
+				notActive.Reset(activityInterval)
+			} else {
+				s.Warnf("Catchup for stream '%s > %s' stalled", mset.account(), mset.name())
+				return
+			}
 		case <-nextBatchC:
-			// Update our activity timer.
-			notActive.Reset(activityInterval)
-			sendNextBatch()
-			// Check if we are finished.
-			if seq > last {
-				s.Debugf("Done resync for stream '%s > %s'", mset.account(), mset.name())
+			if !sendNextBatchAndContinue() {
+				return
+			}
+		case <-cbKick:
+			if !sendNextBatchAndContinue() {
 				return
 			}
 		}

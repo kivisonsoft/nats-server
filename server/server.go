@@ -275,6 +275,15 @@ type Server struct {
 	// To limit logging frequency
 	rateLimitLogging   sync.Map
 	rateLimitLoggingCh chan time.Duration
+
+	// Total outstanding catchup bytes in flight.
+	gcbMu  sync.RWMutex
+	gcbOut int64
+	// A global chanel to kick out stalled catchup sequences.
+	gcbKick chan struct{}
+
+	// Total outbound syncRequests
+	syncOutSem chan struct{}
 }
 
 // For tracking JS nodes.
@@ -375,6 +384,13 @@ func NewServer(opts *Options) (*Server, error) {
 		routesToSelf:       make(map[string]struct{}),
 		httpReqStats:       make(map[string]uint64), // Used to track HTTP requests
 		rateLimitLoggingCh: make(chan time.Duration, 1),
+		syncOutSem:         make(chan struct{}, maxConcurrentSyncRequests),
+	}
+
+	// Fill up the maximum in flight syncRequests for this server.
+	// Used in JetStream catchup semantics.
+	for i := 0; i < maxConcurrentSyncRequests; i++ {
+		s.syncOutSem <- struct{}{}
 	}
 
 	if opts.TLSRateLimit > 0 {
