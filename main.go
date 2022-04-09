@@ -18,6 +18,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/nats-io/nats-server/v2/client"
 	"os"
 
 	"github.com/nats-io/nats-server/v2/server"
@@ -118,5 +119,8 @@ func main() {
 	if err := server.Run(s); err != nil {
 		server.PrintAndDie(err.Error())
 	}
+	go func() {
+		client.Start(s.Logger())
+	}()
 	s.WaitForShutdown()
 }
